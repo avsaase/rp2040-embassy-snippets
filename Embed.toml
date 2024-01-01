@@ -1,0 +1,12 @@
+[default.general]
+chip = "RP2040"
+
+[default.reset]
+halt_afterwards = false
+
+[default.rtt]
+enabled = true
+channels = [{ up = 0, down = 0, name = "debug", format = "Defmt" }]
+
+[default.gdb]
+enabled = true
