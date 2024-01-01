@@ -85,22 +85,27 @@ async fn main(_spawner: Spawner) {
     let mut dma_ref = p.DMA_CH0.into_ref();
     let tx = pio.sm0.tx();
 
-    let samples = generate_samples(&mut dma_buffer, 400, 0.5);
+    let samples = generate_samples(&mut dma_buffer, 1000, -6.0);
+
     loop {
         tx.dma_push(dma_ref.reborrow(), samples).await;
     }
 }
 
-pub fn generate_samples(buf: &mut [u32], frequency: u32, volume: f32) -> &[u32] {
+/// Generates one period of audio samples of a sine wave of the given frequency.
+///
+/// Returns a slice containing the samples.
+pub fn generate_samples(buf: &mut [u32], frequency: u32, volume_db: f32) -> &[u32] {
     let mut current = 0.0;
     let delta = frequency as f32 * TAU / SAMPLE_RATE as f32;
     let samples_per_period = SAMPLE_RATE / frequency;
+    let amplitude = libm::powf(10.0, volume_db / 20.).min(1.0) * i32::MAX as f32;
 
     for frame in buf
         .chunks_mut(CHANNELS as usize)
         .take(samples_per_period as usize)
     {
-        let val = (libm::sinf(current) * i32::MAX as f32 * volume) as i32 as u32;
+        let val = (libm::sinf(current) * amplitude) as i32 as u32;
         frame[0] = val;
         frame[1] = val;
         current += delta;
