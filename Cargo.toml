@@ -3,7 +3,6 @@ name = "rp2040-embassy-snippets"
 version = "0.1.0"
 edition = "2021"
 
-
 [dependencies]
 # Embassy
 embassy-rp = { git = "https://github.com/embassy-rs/embassy", rev = "fe8c46bce329efe7921386dd46a493f607453bd8", features = [
@@ -39,19 +38,22 @@ cortex-m = { version = "0.7.6", features = ["inline-asm"] }
 cortex-m-rt = "0.7.0"
 panic-probe = { version = "0.3", features = ["print-defmt"] }
 embedded-graphics = { version = "0.8.1", features = ["defmt", "fixed_point"] }
+heapless = { version = "0.8.0", features = ["defmt-03"] }
 
 # Drivers
 sh1108 = "0.1.0"
 display-interface-spi = "0.4"
 display-interface-i2c = "0.4"
 
-# Rp2040
+# RP2040
 pio-proc = "0.2"
 pio = "0.2.1"
 
 # Math
 fixed = "1.24.0"
 libm = "0.2.8"
+
+futures = { version = "0.3.30", default-features = false }
 
 [profile.release]
 debug = 2
