@@ -26,10 +26,9 @@ use embassy_rp::{
     Peripheral,
 };
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
-use embassy_time::{Instant, Timer};
-use fixed::traits::ToFixed;
+use embassy_time::Timer;
+use fixed::{traits::ToFixed, types::I16F16};
 use futures::future::FutureExt;
-use heapless::Vec;
 use panic_probe as _;
 
 bind_interrupts!(struct Irqs {
@@ -39,13 +38,12 @@ bind_interrupts!(struct Irqs {
 static INTERRUPT_EXECUTOR: InterruptExecutor = InterruptExecutor::new();
 
 const SAMPLE_RATE: u32 = 8_000;
-const BIT_DEPTH: u32 = 32;
+const BIT_DEPTH: u32 = 16;
 const CHANNELS: u32 = 2;
-const MIN_FREQUENCY: u32 = 200;
-const BUFFER_SIZE: usize = (SAMPLE_RATE / MIN_FREQUENCY * CHANNELS) as usize;
+const BUFFER_SIZE: usize = (SAMPLE_RATE * CHANNELS) as usize / 200; // 5ms buffer
 
 // Signal used to communicate between main() and the PIO task.
-static SIGNAL: Signal<CriticalSectionRawMutex, Vec<u32, 80>> = Signal::new();
+static SIGNAL: Signal<CriticalSectionRawMutex, f32> = Signal::new();
 
 // Table of sine values to speed up calculation of the audio samples.
 include!(concat!(env!("OUT_DIR"), "/sine_table.rs"));
@@ -78,23 +76,18 @@ async fn main(_spawner: Spawner) {
         .unwrap();
     info!("Spawned PIO task");
 
-    // Change the tone frequency, compute the audio samples and push them to the signal.
-    let mut frequency = 300;
+    let mut frequency = 250f32;
+    let mut delta = 5.0;
     loop {
-        let start = Instant::now();
-        let samples = generate_samples(frequency, -20.0);
-        info!(
-            "Calculated audio samples for frequency {}Hz in {}us",
-            frequency,
-            start.elapsed().as_micros(),
-        );
-        SIGNAL.signal(samples);
+        SIGNAL.signal(frequency);
 
-        frequency += 100;
-        if frequency > 1000 {
-            frequency = 300
+        frequency += delta;
+        if frequency > 1500.0 {
+            delta = -5.0;
+        } else if frequency < 250.0 {
+            delta = 5.0;
         }
-        Timer::after_millis(500).await;
+        Timer::after_millis(10).await;
     }
 }
 
@@ -109,12 +102,12 @@ async fn pio_task(
     #[rustfmt::skip]
     let pio_program = pio_proc::pio_asm!(
         ".side_set 2",
-        "    set x, 30          side 0b01", // side 0bWB - W = Word Clock, B = Bit Clock
+        "    set x, 14          side 0b01", // side 0bWB - W = Word Clock, B = Bit Clock
         "left_data:",
         "    out pins, 1        side 0b00",
         "    jmp x-- left_data  side 0b01",
         "    out pins 1         side 0b10",
-        "    set x, 30          side 0b11",
+        "    set x, 14          side 0b11",
         "right_data:",
         "    out pins 1         side 0b10",
         "    jmp x-- right_data side 0b11",
@@ -135,7 +128,7 @@ async fn pio_task(
         let clock_frequency = SAMPLE_RATE * BIT_DEPTH * CHANNELS;
         cfg.clock_divider = (125_000_000. / clock_frequency as f64 / 2.).to_fixed();
         cfg.shift_out = ShiftConfig {
-            threshold: 32,
+            threshold: 16,
             direction: ShiftDirection::Left,
             auto_fill: true,
         };
@@ -152,37 +145,58 @@ async fn pio_task(
     let mut dma_ref = dma_channel.into_ref();
     let tx = pio.sm0.tx();
 
-    let mut buf = Vec::<u32, BUFFER_SIZE>::from_slice(&[0, 0]).unwrap();
+    let mut frequency = 300.0;
+    let mut generator = ToneGenerator::new();
+
     loop {
-        // If there is a new set of samples, replace the buffer with the new values.
-        if let Some(samples) = SIGNAL.wait().now_or_never() {
-            buf = samples;
+        // Check if the frequency should be changed
+        if let Some(new_frequency) = SIGNAL.wait().now_or_never() {
+            frequency = new_frequency;
         }
 
+        // Generate the audio samples
+        generator.generate_samples(frequency, 0.1);
+
         // Push the values to the state machine FIFO using DMA.
-        tx.dma_push(dma_ref.reborrow(), &buf).await;
+        tx.dma_push(dma_ref.reborrow(), &generator.buffer).await;
     }
 }
 
-/// Generates one period of audio samples of a sine wave of the given frequency.
-pub fn generate_samples(frequency: u32, volume_db: f32) -> Vec<u32, BUFFER_SIZE> {
-    let mut current = 0.0;
-    let delta = frequency as f32 * TAU / SAMPLE_RATE as f32;
-    let amplitude = libm::powf(10.0, volume_db / 20.).min(1.0) * i32::MAX as f32;
-
-    let mut buffer = Vec::new();
-
-    while current < TAU {
-        let val = (lookup_sine(current) * amplitude) as i32 as u32;
-        buffer.push(val).unwrap(); // Left channel
-        buffer.push(val).unwrap(); // Right channel
-        current += delta;
-    }
-    buffer
+struct ToneGenerator {
+    phase: I16F16,
+    buffer: [u16; BUFFER_SIZE],
 }
 
-fn lookup_sine(angle: f32) -> f32 {
+impl ToneGenerator {
+    fn new() -> Self {
+        Self {
+            phase: I16F16::ZERO,
+            buffer: [0u16; BUFFER_SIZE],
+        }
+    }
+
+    fn generate_samples(&mut self, frequency: f32, volume: f32) {
+        let delta = (frequency * TAU / SAMPLE_RATE as f32).to_fixed::<I16F16>();
+        let amplitude = I16F16::from_num(volume);
+
+        for frame in self.buffer.chunks_mut(2) {
+            let sine_fixed = I16F16::from_num(lookup_sine(self.phase));
+            let value = (sine_fixed * amplitude).to_num::<i16>() as u16;
+            frame[0] = value;
+            frame[1] = value;
+
+            self.phase += delta;
+            if self.phase > I16F16::TAU {
+                self.phase -= I16F16::TAU;
+            }
+        }
+    }
+}
+
+fn lookup_sine(angle: I16F16) -> i16 {
     const TABLE_SIZE: usize = SINE_TABLE.len();
-    let index = angle / TAU * TABLE_SIZE as f32;
-    SINE_TABLE[index as usize % TABLE_SIZE]
+    let index = (angle / I16F16::TAU * TABLE_SIZE.to_fixed::<I16F16>())
+        .round()
+        .to_num::<usize>();
+    SINE_TABLE[index % TABLE_SIZE]
 }
