@@ -17,11 +17,7 @@ fn main() {
     let path = Path::new(&std::env::var("OUT_DIR").unwrap()).join("sine_table.rs");
     let mut file = File::create(path).unwrap();
 
-    writeln!(
-        &mut file,
-        "#[allow(clippy::excessive_precision, clippy::approx_constant)]"
-    )
-    .unwrap();
+    writeln!(&mut file, "#[rustfmt::skip]").unwrap();
     writeln!(&mut file, "pub const SINE_TABLE: [i16; {}] = [", TABLE_SIZE).unwrap();
     table.iter().for_each(|entry| {
         writeln!(&mut file, "    {},", entry).unwrap();
