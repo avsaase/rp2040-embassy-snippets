@@ -1,6 +1,6 @@
 use std::{f64::consts::TAU, fs::File, io::Write, path::Path};
 
-const TABLE_SIZE: usize = 4096;
+const TABLE_SIZE: usize = 256;
 
 fn generate_lookup<const N: usize>() -> [i16; N] {
     let mut table = [0i16; N];

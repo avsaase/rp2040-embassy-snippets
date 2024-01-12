@@ -12,8 +12,6 @@
 #![no_std]
 #![no_main]
 
-use core::f32::consts::TAU;
-
 use defmt::info;
 use defmt_rtt as _;
 use embassy_executor::{InterruptExecutor, Spawner};
@@ -26,8 +24,8 @@ use embassy_rp::{
     Peripheral,
 };
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
-use embassy_time::Timer;
-use fixed::{traits::ToFixed, types::I16F16};
+use embassy_time::{Instant, Timer};
+use fixed::traits::ToFixed;
 use futures::future::FutureExt;
 use panic_probe as _;
 
@@ -40,13 +38,15 @@ static INTERRUPT_EXECUTOR: InterruptExecutor = InterruptExecutor::new();
 const SAMPLE_RATE: u32 = 8_000;
 const BIT_DEPTH: u32 = 16;
 const CHANNELS: u32 = 2;
-const BUFFER_SIZE: usize = (SAMPLE_RATE * CHANNELS) as usize / 200; // 5ms buffer
+const SAMPLE_COUNT: usize = 32;
+const BUFFER_SIZE: usize = SAMPLE_COUNT * CHANNELS as usize;
 
 // Signal used to communicate between main() and the PIO task.
 static SIGNAL: Signal<CriticalSectionRawMutex, f32> = Signal::new();
 
 // Table of sine values to speed up calculation of the audio samples.
 include!(concat!(env!("OUT_DIR"), "/sine_table.rs"));
+const LUT_SIZE: usize = SINE_TABLE.len();
 
 #[cortex_m_rt::interrupt]
 unsafe fn SWI_IRQ_1() {
@@ -87,7 +87,7 @@ async fn main(_spawner: Spawner) {
         } else if frequency < 250.0 {
             delta = 5.0;
         }
-        Timer::after_millis(10).await;
+        Timer::after_millis(15).await;
     }
 }
 
@@ -145,17 +145,17 @@ async fn pio_task(
     let mut dma_ref = dma_channel.into_ref();
     let tx = pio.sm0.tx();
 
-    let mut frequency = 300.0;
     let mut generator = ToneGenerator::new();
+    generator.set_volume(0.1);
 
     loop {
         // Check if the frequency should be changed
         if let Some(new_frequency) = SIGNAL.wait().now_or_never() {
-            frequency = new_frequency;
+            generator.set_frequency(new_frequency);
         }
 
         // Generate the audio samples
-        generator.generate_samples(frequency, 0.1);
+        generator.generate_samples();
 
         // Push the values to the state machine FIFO using DMA.
         tx.dma_push(dma_ref.reborrow(), &generator.buffer).await;
@@ -163,40 +163,66 @@ async fn pio_task(
 }
 
 struct ToneGenerator {
-    phase: I16F16,
+    offset: i32,
+    increment: i32,
+    amplitude: [i16; SAMPLE_COUNT],
+    amplitude_changed: bool,
     buffer: [u16; BUFFER_SIZE],
 }
 
 impl ToneGenerator {
     fn new() -> Self {
         Self {
-            phase: I16F16::ZERO,
+            offset: 0,
+            increment: 0,
+            amplitude: [i16::MAX; SAMPLE_COUNT],
+            amplitude_changed: false,
             buffer: [0u16; BUFFER_SIZE],
         }
     }
 
-    fn generate_samples(&mut self, frequency: f32, volume: f32) {
-        let delta = (frequency * TAU / SAMPLE_RATE as f32).to_fixed::<I16F16>();
-        let amplitude = I16F16::from_num(volume);
+    fn set_frequency(&mut self, frequency: f32) {
+        let samp_per_cyc = SAMPLE_RATE as f32 / frequency;
+        let fincr = LUT_SIZE as f32 / samp_per_cyc;
+        let incr = (((1 << 24) as f32) * fincr) as i32;
+        self.increment = incr;
+    }
 
-        for frame in self.buffer.chunks_mut(2) {
-            let sine_fixed = I16F16::from_num(lookup_sine(self.phase));
-            let value = (sine_fixed * amplitude).to_num::<i16>() as u16;
-            frame[0] = value;
-            frame[1] = value;
+    fn set_volume(&mut self, amplitude: f32) {
+        let amplitude = amplitude.clamp(0.0, 1.0);
+        let amplitude = (amplitude * i16::MAX as f32) as i32;
+        let previous_amplitude = self.amplitude[SAMPLE_COUNT - 1] as i32;
+        for (idx, value) in self.amplitude.iter_mut().enumerate() {
+            let prev_weight = previous_amplitude * ((SAMPLE_COUNT - idx) as i32);
+            let new_weight = amplitude * idx as i32;
+            *value = ((prev_weight.wrapping_add(new_weight)) >> 5) as i16
+        }
+        self.amplitude_changed = true;
+    }
 
-            self.phase += delta;
-            if self.phase > I16F16::TAU {
-                self.phase -= I16F16::TAU;
-            }
+    // Code from https://jamesmunns.com/blog/fixed-point-math/
+    fn generate_samples(&mut self) {
+        for (frame, amplitude) in self.buffer.chunks_mut(2).zip(self.amplitude) {
+            let val = self.offset as u32;
+            let idx_now = ((val >> 24) & 0xFF) as u8;
+            let idx_nxt = idx_now.wrapping_add(1);
+            let base_val = SINE_TABLE[idx_now as usize] as i32;
+            let next_val = SINE_TABLE[idx_nxt as usize] as i32;
+            let off = ((val >> 16) & 0xFF) as i32;
+            let cur_weight = base_val.wrapping_mul((LUT_SIZE as i32).wrapping_sub(off));
+            let nxt_weight = next_val.wrapping_mul(off);
+            let ttl_weight = cur_weight.wrapping_add(nxt_weight);
+            let ttl_val = (ttl_weight >> 8) as i16;
+            let ttl_val = ((ttl_val as i32 * amplitude as i32) >> 15) as u16;
+
+            frame[0] = ttl_val;
+            frame[1] = ttl_val;
+
+            self.offset = self.offset.wrapping_add(self.increment);
+        }
+        if self.amplitude_changed {
+            self.amplitude = [self.amplitude[SAMPLE_COUNT - 1]; SAMPLE_COUNT];
+            self.amplitude_changed = false;
         }
     }
-}
-
-fn lookup_sine(angle: I16F16) -> i16 {
-    const TABLE_SIZE: usize = SINE_TABLE.len();
-    let index = (angle / I16F16::TAU * TABLE_SIZE.to_fixed::<I16F16>())
-        .round()
-        .to_num::<usize>();
-    SINE_TABLE[index % TABLE_SIZE]
 }
