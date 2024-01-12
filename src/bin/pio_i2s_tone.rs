@@ -165,7 +165,7 @@ async fn pio_task(
 struct ToneGenerator {
     offset: i32,
     increment: i32,
-    amplitude: [i16; SAMPLE_COUNT],
+    amplitude: [u16; SAMPLE_COUNT],
     amplitude_changed: bool,
     buffer: [u16; BUFFER_SIZE],
 }
@@ -175,7 +175,7 @@ impl ToneGenerator {
         Self {
             offset: 0,
             increment: 0,
-            amplitude: [i16::MAX; SAMPLE_COUNT],
+            amplitude: [u16::MAX; SAMPLE_COUNT],
             amplitude_changed: false,
             buffer: [0u16; BUFFER_SIZE],
         }
@@ -190,12 +190,12 @@ impl ToneGenerator {
 
     fn set_volume(&mut self, amplitude: f32) {
         let amplitude = amplitude.clamp(0.0, 1.0);
-        let amplitude = (amplitude * i16::MAX as f32) as i32;
-        let previous_amplitude = self.amplitude[SAMPLE_COUNT - 1] as i32;
+        let amplitude = (amplitude * u16::MAX as f32) as u32;
+        let previous_amplitude = self.amplitude[SAMPLE_COUNT - 1] as u32;
         for (idx, value) in self.amplitude.iter_mut().enumerate() {
-            let prev_weight = previous_amplitude * ((SAMPLE_COUNT - idx) as i32);
-            let new_weight = amplitude * idx as i32;
-            *value = ((prev_weight.wrapping_add(new_weight)) >> 5) as i16
+            let prev_weight = previous_amplitude * ((SAMPLE_COUNT - idx) as u32);
+            let new_weight = amplitude * idx as u32;
+            *value = ((prev_weight.wrapping_add(new_weight)) >> 5) as u16
         }
         self.amplitude_changed = true;
     }
@@ -213,7 +213,7 @@ impl ToneGenerator {
             let nxt_weight = next_val.wrapping_mul(off);
             let ttl_weight = cur_weight.wrapping_add(nxt_weight);
             let ttl_val = (ttl_weight >> 8) as i16;
-            let ttl_val = ((ttl_val as i32 * amplitude as i32) >> 15) as u16;
+            let ttl_val = ((ttl_val as i32 * amplitude as i32) >> 16) as u16;
 
             frame[0] = ttl_val;
             frame[1] = ttl_val;
