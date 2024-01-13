@@ -146,7 +146,7 @@ async fn pio_task(
     let tx = pio.sm0.tx();
 
     let mut generator = ToneGenerator::new();
-    generator.set_volume(0.1);
+    generator.set_volume(0.005);
 
     loop {
         // Check if the frequency should be changed
@@ -155,7 +155,10 @@ async fn pio_task(
         }
 
         // Generate the audio samples
+        let start = Instant::now();
         generator.generate_samples();
+        let elapsed = start.elapsed().as_micros();
+        info!("Elapsed: {}us", elapsed);
 
         // Push the values to the state machine FIFO using DMA.
         tx.dma_push(dma_ref.reborrow(), &generator.buffer).await;
@@ -165,8 +168,9 @@ async fn pio_task(
 struct ToneGenerator {
     offset: i32,
     increment: i32,
-    amplitude: [u16; SAMPLE_COUNT],
-    amplitude_changed: bool,
+    amplitude: u16,
+    new_amplitude: Option<u16>,
+    prev_val: i16,
     buffer: [u16; BUFFER_SIZE],
 }
 
@@ -175,8 +179,9 @@ impl ToneGenerator {
         Self {
             offset: 0,
             increment: 0,
-            amplitude: [u16::MAX; SAMPLE_COUNT],
-            amplitude_changed: false,
+            amplitude: u16::MAX,
+            new_amplitude: None,
+            prev_val: 0,
             buffer: [0u16; BUFFER_SIZE],
         }
     }
@@ -190,19 +195,13 @@ impl ToneGenerator {
 
     fn set_volume(&mut self, amplitude: f32) {
         let amplitude = amplitude.clamp(0.0, 1.0);
-        let amplitude = (amplitude * u16::MAX as f32) as u32;
-        let previous_amplitude = self.amplitude[SAMPLE_COUNT - 1] as u32;
-        for (idx, value) in self.amplitude.iter_mut().enumerate() {
-            let prev_weight = previous_amplitude * ((SAMPLE_COUNT - idx) as u32);
-            let new_weight = amplitude * idx as u32;
-            *value = ((prev_weight.wrapping_add(new_weight)) >> 5) as u16
-        }
-        self.amplitude_changed = true;
+        let amplitude = (amplitude * u16::MAX as f32) as u16;
+        self.new_amplitude = Some(amplitude);
     }
 
     // Code from https://jamesmunns.com/blog/fixed-point-math/
     fn generate_samples(&mut self) {
-        for (frame, amplitude) in self.buffer.chunks_mut(2).zip(self.amplitude) {
+        for frame in self.buffer.chunks_mut(2) {
             let val = self.offset as u32;
             let idx_now = ((val >> 24) & 0xFF) as u8;
             let idx_nxt = idx_now.wrapping_add(1);
@@ -213,16 +212,23 @@ impl ToneGenerator {
             let nxt_weight = next_val.wrapping_mul(off);
             let ttl_weight = cur_weight.wrapping_add(nxt_weight);
             let ttl_val = (ttl_weight >> 8) as i16;
-            let ttl_val = ((ttl_val as i32 * amplitude as i32) >> 16) as u16;
+
+            if let Some(new_amplitude) = self.new_amplitude {
+                if ttl_val.signum() != self.prev_val.signum() {
+                    // This is the first sample after a zero crossing,
+                    // change the gain now so it's doesn't cause clicking.
+                    self.amplitude = new_amplitude;
+                    self.new_amplitude = None;
+                }
+            }
+            self.prev_val = ttl_val;
+
+            let ttl_val = ((ttl_val as i32 * self.amplitude as i32) >> 16) as u16;
 
             frame[0] = ttl_val;
             frame[1] = ttl_val;
 
             self.offset = self.offset.wrapping_add(self.increment);
-        }
-        if self.amplitude_changed {
-            self.amplitude = [self.amplitude[SAMPLE_COUNT - 1]; SAMPLE_COUNT];
-            self.amplitude_changed = false;
         }
     }
 }
