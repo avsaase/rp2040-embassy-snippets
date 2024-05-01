@@ -35,18 +35,19 @@ bind_interrupts!(struct Irqs {
 
 static INTERRUPT_EXECUTOR: InterruptExecutor = InterruptExecutor::new();
 
-const SAMPLE_RATE: u32 = 8_000;
+const SAMPLE_RATE: u32 = 9_000;
 const BIT_DEPTH: u32 = 16;
 const CHANNELS: u32 = 2;
-const SAMPLE_COUNT: usize = 32;
+const SAMPLE_COUNT: usize = SAMPLE_RATE as usize / 200;
 const BUFFER_SIZE: usize = SAMPLE_COUNT * CHANNELS as usize;
 
 // Signal used to communicate between main() and the PIO task.
 static SIGNAL: Signal<CriticalSectionRawMutex, f32> = Signal::new();
 
 // Table of sine values to speed up calculation of the audio samples.
-include!(concat!(env!("OUT_DIR"), "/sine_table.rs"));
-const LUT_SIZE: usize = SINE_TABLE.len();
+include!(concat!(env!("OUT_DIR"), "/sine_lut.rs"));
+include!(concat!(env!("OUT_DIR"), "/triangle_lut.rs"));
+const LUT_SIZE: usize = SINE_LUT.len();
 
 #[cortex_m_rt::interrupt]
 unsafe fn SWI_IRQ_1() {
@@ -76,7 +77,7 @@ async fn main(_spawner: Spawner) {
         .unwrap();
     info!("Spawned PIO task");
 
-    let mut frequency = 250f32;
+    let mut frequency = 200.;
     let mut delta = 5.0;
     loop {
         SIGNAL.signal(frequency);
@@ -84,10 +85,10 @@ async fn main(_spawner: Spawner) {
         frequency += delta;
         if frequency > 1500.0 {
             delta = -5.0;
-        } else if frequency < 250.0 {
+        } else if frequency < 200.0 {
             delta = 5.0;
         }
-        Timer::after_millis(15).await;
+        Timer::after_millis(20).await;
     }
 }
 
@@ -145,8 +146,9 @@ async fn pio_task(
     let mut dma_ref = dma_channel.into_ref();
     let tx = pio.sm0.tx();
 
+    // let mut generator = ToneGenerator::new();
     let mut generator = ToneGenerator::new();
-    generator.set_volume(0.005);
+    generator.set_volume(0.05);
 
     loop {
         // Check if the frequency should be changed
@@ -205,8 +207,8 @@ impl ToneGenerator {
             let val = self.offset as u32;
             let idx_now = ((val >> 24) & 0xFF) as u8;
             let idx_nxt = idx_now.wrapping_add(1);
-            let base_val = SINE_TABLE[idx_now as usize] as i32;
-            let next_val = SINE_TABLE[idx_nxt as usize] as i32;
+            let base_val = TRIANGLE_LUT[idx_now as usize] as i32;
+            let next_val = TRIANGLE_LUT[idx_nxt as usize] as i32;
             let off = ((val >> 16) & 0xFF) as i32;
             let cur_weight = base_val.wrapping_mul((LUT_SIZE as i32).wrapping_sub(off));
             let nxt_weight = next_val.wrapping_mul(off);
