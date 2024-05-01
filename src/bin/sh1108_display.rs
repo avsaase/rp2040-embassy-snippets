@@ -11,6 +11,7 @@ use embassy_rp::{
     spi::{self, Spi},
 };
 use embassy_time::Delay;
+use embedded_hal_bus::spi::ExclusiveDevice;
 use panic_probe as _;
 use sh1108::{mode::GraphicsMode, Builder};
 
@@ -23,12 +24,11 @@ async fn main(_spawner: Spawner) {
     let mut res = Output::new(p.PIN_12, Level::High);
     let dc = Output::new(p.PIN_13, Level::High);
     let cs = Output::new(p.PIN_14, Level::High);
-
     let mut config = spi::Config::default();
     config.frequency = 400_000;
-    let spi = Spi::new_txonly(p.SPI1, sck, mosi, p.DMA_CH2, config);
-
-    let display_interface = SPIInterface::new(spi, dc, cs);
+    let spi = Spi::new_blocking_txonly(p.SPI1, sck, mosi, config);
+    let spi_device = ExclusiveDevice::new(spi, cs, Delay);
+    let display_interface = SPIInterface::new(spi_device, dc);
 
     let mut display: GraphicsMode<_> = Builder::new().connect(display_interface).into();
 
@@ -36,29 +36,22 @@ async fn main(_spawner: Spawner) {
     display.init().unwrap();
     display.flush().unwrap();
 
-    // Top side
-    display.set_pixel(0, 0, 1);
-    display.set_pixel(1, 0, 1);
-    display.set_pixel(2, 0, 1);
-    display.set_pixel(3, 0, 1);
-
-    // Right side
-    display.set_pixel(3, 0, 1);
-    display.set_pixel(3, 1, 1);
-    display.set_pixel(3, 2, 1);
-    display.set_pixel(3, 3, 1);
-
-    // Bottom side
-    display.set_pixel(0, 3, 1);
-    display.set_pixel(1, 3, 1);
-    display.set_pixel(2, 3, 1);
-    display.set_pixel(3, 3, 1);
-
-    // Left side
-    display.set_pixel(0, 0, 1);
-    display.set_pixel(0, 1, 1);
-    display.set_pixel(0, 2, 1);
-    display.set_pixel(0, 3, 1);
-
-    display.flush().unwrap();
+    let mut x = 0;
+    let mut y = 0;
+    loop {
+        display.clear();
+        display.set_pixel(x, y, 1);
+        display.set_pixel(x + 1, y, 1);
+        display.set_pixel(x, y + 1, 1);
+        display.set_pixel(x + 1, y + 1, 1);
+        x += 2;
+        if x == 128 {
+            x = 0;
+            y += 2;
+        }
+        if y == 64 {
+            break;
+        }
+        display.flush().unwrap();
+    }
 }
